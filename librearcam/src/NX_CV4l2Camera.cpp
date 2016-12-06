@@ -1,0 +1,439 @@
+//------------------------------------------------------------------------------
+//
+//	Copyright (C) 2016 Nexell Co. All Rights Reserved
+//	Nexell Co. Proprietary & Confidential
+//
+//	NEXELL INFORMS THAT THIS CODE AND INFORMATION IS PROVIDED "AS IS" BASE
+//  AND	WITHOUT WARRANTY OF ANY KIND, EITHER EXPRESSED OR IMPLIED, INCLUDING
+//  BUT NOT LIMITED TO THE IMPLIED WARRANTIES OF MERCHANTABILITY AND/OR FITNESS
+//  FOR A PARTICULAR PURPOSE.
+//
+//	Module		:
+//	File		:
+//	Description	:
+//	Author		:
+//	Export		:
+//	History		:
+//
+//------------------------------------------------------------------------------
+
+#include "NX_CV4l2Camera.h"
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <linux/videodev2.h>
+#include <videodev2_nxp_media.h>
+#include <media-bus-format.h>
+#include <nx-drm-allocator.h>
+#include <unistd.h>
+
+#include <xf86drm.h>
+#include <xf86drmMode.h>
+#include <drm/drm_fourcc.h>
+#include <nexell/nexell_drm.h>
+
+#ifndef ALIGN
+#define ALIGN(x, a) (((x) + (a) - 1) & ~((a) - 1))
+#endif
+
+//------------------------------------------------------------------------------
+NX_CV4l2Camera::NX_CV4l2Camera()
+	: m_bInit(0)
+	, m_iCurQueuedSize(0)
+	, m_iRegBufSize(0)
+{
+	for(int32_t i = 0; i < MAX_BUF_NUM; i++ )
+	{
+		m_pMemSlot[i] = NULL;
+	}
+
+	pthread_mutex_init( &m_hLock, NULL );
+}
+
+//------------------------------------------------------------------------------
+NX_CV4l2Camera::~NX_CV4l2Camera()
+{
+	pthread_mutex_destroy( &m_hLock );
+}
+
+//------------------------------------------------------------------------------
+int32_t NX_CV4l2Camera::V4l2CameraInit()
+{
+	int32_t ret = 0, i = 0;
+
+	ret = V4l2OpenDevices();
+	if( -1 == ret )
+	{
+		printf( "Fail, V4l2OpenDevices().\n" );
+		return -1;
+	}
+
+	ret = V4l2Link();
+	if( -1 == ret )
+	{
+		printf( "Fail, V4l2Link().\n" );
+		return -1;
+	}
+
+	ret = V4l2SetFormat();
+	if( -1 == ret )
+	{
+		printf( "Fail, V4l2SetFormat().\n" );
+		return -1;
+	}
+
+	ret = nx_v4l2_reqbuf(m_iClipperVideoFd, nx_clipper_video, m_iRegBufSize);
+	if (ret)
+	{
+		printf( "failed to reqbuf\n");
+		return -1;
+	}
+
+	for (i = 0; i < m_iRegBufSize; i++)
+	{
+		printf("nx_v4l2_qbuf[%d], DmaFd[%d], BufferSize[%d]\n",
+				i, m_iDmaFds[i][0], m_iBufferSize[i][0]);
+		ret = nx_v4l2_qbuf(m_iClipperVideoFd,
+							nx_clipper_video, m_iNumPlane, i,
+							(int32_t*)&m_iDmaFds[i],
+							(int32_t *)&m_iBufferSize[i]);
+		if (ret)
+		{
+			printf( "failed to qbuf: index %d\n", i);
+			return -1;
+		}
+	}
+
+	ret = nx_v4l2_streamon(m_iClipperVideoFd, nx_clipper_video);
+	if (ret)
+	{
+		printf( "failed to streamon");
+		return -1;
+	}
+
+	return 0;
+}
+
+//------------------------------------------------------------------------------
+int32_t NX_CV4l2Camera::V4l2OpenDevices()
+{
+	// open devices
+	m_iSensorFd = nx_v4l2_open_device(m_iSensorId, m_iModule);
+	if (m_iSensorFd < 0)
+	{
+		printf( "Fail, nx_v4l2_open_device(%d).\n", m_iSensorId );
+		return -1;
+	}
+
+	m_iClipperSubdevFd = nx_v4l2_open_device(nx_clipper_subdev, m_iModule);
+	if (m_iDecimatorSubdevFd < 0)
+	{
+		printf( "Fail, nx_v4l2_open_device(nx_clipper_subdev).\n" );
+		return -1;
+	}
+
+	m_iClipperVideoFd = nx_v4l2_open_device(nx_clipper_video, m_iModule);
+	if (m_iClipperSubdevFd < 0)
+	{
+		printf( "Fail, nx_v4l2_open_device(clipper_video).\n" );
+		return -1;
+	}
+
+	m_bIsMiPi = nx_v4l2_is_mipi_camera(m_iModule);
+	if (m_bIsMiPi)
+	{
+		m_iCsiSubdevFd = nx_v4l2_open_device(nx_csi_subdev, m_iModule);
+		if (m_iCsiSubdevFd < 0)
+		{
+			printf( "Failed to open mipi csi.\n" );
+			return -1;
+		}
+	}
+
+	printf("[%d] m_iSensorFd = %d, m_iDecimatorSubdevFd = %d, m_iClipperVideoFd=%d\n",
+		m_iModule, m_iSensorFd, m_iDecimatorSubdevFd, m_iClipperVideoFd);
+
+	return 0;
+}
+
+//------------------------------------------------------------------------------
+int32_t NX_CV4l2Camera::V4l2Link()
+{
+	int32_t ret = 0;
+
+	// link
+	ret = nx_v4l2_link(true, m_iModule, nx_clipper_subdev, 1,
+						nx_clipper_video, 0);
+	if (ret)
+	{
+		printf( "failed to link clipper_sub -> clipper_video.\n" );
+		return -1;
+	}
+
+	if (m_bIsMiPi)
+	{
+		ret = nx_v4l2_link(true, m_iModule, nx_sensor_subdev, 0,
+						nx_csi_subdev, 0);
+		if (ret)
+		{
+			printf( "failed to link sensor -> mipi_csi.\n" );
+			return -1;
+		}
+
+		ret = nx_v4l2_link(true, m_iModule, nx_csi_subdev, 1,
+						nx_clipper_subdev, 0);
+		if (ret)
+		{
+			printf( "failed to link mipi_csi -> clipper_sub.\n" );
+			return -1;
+		}
+	}
+	else
+	{
+		ret = nx_v4l2_link(true, m_iModule, nx_sensor_subdev, 0,
+						nx_clipper_subdev, 0);
+		if (ret)
+		{
+			printf( "failed to link sensor -> clipper_sub.\n" );
+			return -1;
+		}
+	}
+
+	return 0;
+}
+
+//------------------------------------------------------------------------------
+int32_t NX_CV4l2Camera::V4l2SetFormat()
+{
+	int32_t ret = 0;
+
+	printf("m_iWidth=%d, m_iHeight=%d, m_iBusFormat=0x%08x\n", m_iWidth, m_iHeight, m_iBusFormat);
+
+	ret = nx_v4l2_set_format( m_iSensorFd, nx_sensor_subdev, m_iWidth, m_iHeight, m_iBusFormat );
+	if (ret)
+	{
+		printf( "failed to set_format for sensor.\n" );
+		return -1;
+	}
+
+	if( m_bIsMiPi )
+	{
+		ret = nx_v4l2_set_format( m_iCsiSubdevFd, nx_csi_subdev, m_iWidth, m_iHeight, m_iPixelFormat );
+		if (ret)
+		{
+			printf( "failed to nx_v4l2_set_format for mipi_csi.\n" );
+			return -1;
+		}
+	}
+
+	ret = nx_v4l2_set_format(m_iClipperSubdevFd, nx_clipper_subdev, m_iWidth, m_iHeight, m_iBusFormat);
+	if (ret)
+	{
+		printf( "failed to nx_v4l2_set_format for nx_clipper_subdev.(m_iClipperSubdevFd=%d)\n",
+				m_iClipperSubdevFd );
+		return -1;
+	}
+
+	ret = nx_v4l2_set_format(m_iClipperVideoFd, nx_clipper_video, m_iWidth, m_iHeight, m_iPixelFormat);
+	if (ret)
+	{
+		printf( "failed to nx_v4l2_set_format for nx_clipper_video.\n" );
+		return -1;
+	}
+
+	if (m_iCropX && m_iCropY && m_iCropWidth && m_iCropHeight)
+	{
+		ret = nx_v4l2_set_crop(m_iClipperSubdevFd, nx_clipper_subdev,
+							m_iCropX, m_iCropY, m_iCropWidth, m_iCropHeight);
+		if (ret)
+		{
+			printf( "failed to nx_v4l2_set_crop for nx_clipper_subdev.\n" );
+			return -1;
+		}
+	}
+	else
+	{
+		ret = nx_v4l2_set_crop(m_iClipperSubdevFd, nx_clipper_subdev,
+								0, 0, m_iWidth, m_iHeight);
+		if (ret)
+		{
+			printf( "failed to set_crop for clipper_subdev.\n" );
+			return -1;
+		}
+	}
+	return 0;
+}
+
+//------------------------------------------------------------------------------
+int32_t NX_CV4l2Camera::Init( NX_VIP_INFO *pInfo )
+{
+	int32_t ret = 0;
+	//
+	m_iModule				= pInfo->iModule;
+	m_iSensorId				= pInfo->iSensorId;
+	//
+	m_iWidth				= pInfo->iWidth;
+	m_iHeight				= pInfo->iHeight;
+	m_iCropX				= pInfo->iCropX;
+	m_iCropX				= pInfo->iCropY;
+	m_iCropWidth			= pInfo->iCropWidth;
+	m_iCropHeight			= pInfo->iCropHeight;
+	//
+	m_iNumPlane				= pInfo->iNumPlane;
+	m_iPixelFormat			= V4L2_PIX_FMT_YUV420;
+	m_iBusFormat			= MEDIA_BUS_FMT_UYVY8_2X8;  //navi 4418
+
+	//
+	m_bIsMiPi				= 0;
+	m_iSensorFd				= 0;
+	m_iClipperSubdevFd		= 0;
+	m_iDecimatorSubdevFd	= 0;
+	m_iCsiSubdevFd			= 0;
+	m_iClipperVideoFd		= 0;
+	m_iDecimatorVideoFd		= 0;
+
+	ret = V4l2CameraInit();
+	if( -1 == ret )
+	{
+		printf( "Fail, V4l2Init().\n" );
+		return -1;
+	}
+
+	m_bInit = 1;
+
+	return 0;
+}
+
+//------------------------------------------------------------------------------
+void NX_CV4l2Camera::Deinit( void )
+{
+	if( m_bInit )
+	{
+		V4l2Deinit();
+		m_iCurQueuedSize= 0;
+		for(int32_t i = 0; i < MAX_BUF_NUM; i++ )
+		{
+			m_pMemSlot[i] = NULL;
+			memset(m_iDmaFds, 0, sizeof(m_iDmaFds));
+			memset(m_iGemFds, 0, sizeof(m_iGemFds));
+			memset(m_iBufferSize, 0, sizeof(m_iBufferSize));
+			memset(m_pVirAddr, 0, sizeof(m_pVirAddr));
+		}
+		m_iRegBufSize = 0;
+		m_bInit = 0;
+	}
+}
+
+//------------------------------------------------------------------------------
+void NX_CV4l2Camera::V4l2Deinit()
+{
+	nx_v4l2_streamoff(m_iClipperSubdevFd, nx_clipper_video);
+	nx_v4l2_reqbuf(m_iClipperVideoFd, nx_clipper_video, 0);
+}
+
+//------------------------------------------------------------------------------
+int32_t NX_CV4l2Camera::QueueBuffer( int32_t bufferIndex )
+{
+	int32_t iSlotIndex, i;
+	int32_t iRet = 0;
+
+	//	Update Queue Size
+	pthread_mutex_lock( &m_hLock );
+	if( bufferIndex >= MAX_BUF_NUM )
+	{
+		pthread_mutex_unlock( &m_hLock );
+		return -1;
+	}
+	m_iCurQueuedSize++;
+	pthread_mutex_unlock( &m_hLock );
+
+	iRet = nx_v4l2_qbuf( m_iClipperVideoFd, nx_clipper_video,
+						m_iNumPlane,
+						bufferIndex,
+						(int32_t *)&m_iDmaFds[bufferIndex],
+						(int32_t *)&m_iBufferSize[bufferIndex]);
+
+	if( 0 > iRet )
+	{
+		m_pMemSlot[iSlotIndex] = NULL;
+		printf( "Fail, nx_v4l2_qbuf().\n" );
+		return iRet;
+	}
+
+	return 0;
+}
+
+//------------------------------------------------------------------------------
+int32_t NX_CV4l2Camera::DequeueBuffer( int32_t *pBufferIndex )
+{
+	int32_t iRet = 0;
+	int32_t iSlotIndex = -1;
+
+	pthread_mutex_lock( &m_hLock );
+
+	if( m_iCurQueuedSize < 2 )
+	{
+		pthread_mutex_unlock( &m_hLock );
+		return -1;
+	}
+	pthread_mutex_unlock( &m_hLock );
+
+	iRet = nx_v4l2_dqbuf(m_iClipperVideoFd, nx_clipper_video, m_iNumPlane, &iSlotIndex);
+
+	if( 0 > iRet )
+	{
+		printf( "Fail, nx_v4l2_dqbuf().\n" );
+		return iRet;
+	}
+
+	*pBufferIndex = iSlotIndex;
+	pthread_mutex_lock( &m_hLock );
+	m_iCurQueuedSize--;
+	pthread_mutex_unlock( &m_hLock );
+
+	return iRet;
+}
+
+//------------------------------------------------------------------------------
+int32_t NX_CV4l2Camera::AddVideoMemory( NX_VID_MEMORY_INFO *pVidMem )
+{
+	int32_t i = 0;
+
+	pthread_mutex_lock( &m_hLock );
+
+	if( m_iCurQueuedSize >= MAX_BUF_NUM )
+	{
+		pthread_mutex_unlock( &m_hLock );
+		return -1;
+	}
+
+	for( i = 0; i < MAX_BUF_NUM; i++ )
+	{
+		if( m_pMemSlot[i] == NULL )
+		{
+			m_pMemSlot[i] = pVidMem;
+
+			for( int32_t j=0 ; j<NX_MAX_PLANES ; j++ )
+			{
+				m_iDmaFds[i][j] 	= pVidMem->dmaFd[j];
+				m_iGemFds[i][j] 	= pVidMem->gemFd[j];
+				m_iBufferSize[i][j]	= pVidMem->size[j];
+				m_iStride[i][j]		= pVidMem->stride[j];
+				m_pVirAddr[i][j]	= pVidMem->pBuffer[j];
+			}
+			break;
+		}
+	}
+
+	if( i == MAX_BUF_NUM )
+	{
+		printf( "Fail, Have no empty slot.\n" );
+		pthread_mutex_unlock( &m_hLock );
+		return -1;
+	}
+	m_iRegBufSize++;
+	m_iCurQueuedSize ++;
+	pthread_mutex_unlock( &m_hLock );
+
+	return 0;
+}
