@@ -1,14 +1,12 @@
 ########################################################################
 # Get Linux Build Enviornment:
 include ../build.env
-######################################################################
-#
-#	CameraTest Application
-#
-# Build options
-SYSROOT_DIR	:= /opt/poky/2.1.1/sysroots/cortexa9hf-neon-poky-linux-gnueabi
-CFLAGS		+= -fPIC -mfloat-abi=hard --sysroot=$(SYSROOT_DIR)
-CPPFLAGS	+= -fPIC -mfloat-abi=hard --sysroot=$(SYSROOT_DIR)
+
+CFLAGS		+= -fPIC -mfloat-abi=hard
+CPPFLAGS	+= -fPIC -mfloat-abi=hard
+
+LIBPATH 	?= $(SDKTARGETSYSROOT)/usr/lib
+INCPATH 	?= $(SDKTARGETSYSROOT)/usr/include
 
 #########################################################################
 #																		#
@@ -16,18 +14,8 @@ CPPFLAGS	+= -fPIC -mfloat-abi=hard --sysroot=$(SYSROOT_DIR)
 #																		#
 #########################################################################
 #	Local Application Includes
-INCLUDE		+= -I./ -I../include
 
-INCLUDE		+= -I$(LIBSDIR)/include
-INCLUDE		+= -I$(LIBSDIR)/../include
-
-#	DRM/KMS
-INCLUDE		+= -I$(LIBSDIR)/include/libdrm
-INCLUDE		+= -I$(LIBSDIR)/include/libkms
-#	V4L2 Driver
-INCLUDE		+= -I$(LIBSDIR)/include/nexell
-#	Other Private Includes
-INCLUDE		+= -I/opt/poky/2.1.1/sysroots/cortexa9hf-neon-poky-linux-gnueabi/usr/include
+INCLUDE		?= -I./ -I../include -I$(INCPATH) -I$(INCPATH)/libdrm -I$(INCPATH)/drm -I$(INCPATH)/libkms -I$(INCPATH)/nexell
 
 #########################################################################
 #																		#
@@ -50,12 +38,7 @@ CPPOBJS		+=	NX_CRearCamMgr.o
 #								Library									#
 #																		#
 #########################################################################
-#	DRM
-LIBRARY 	+= -L$(LIBSDIR)/lib -L$(LIBSDIR)/lib/ldrm -L$(LIBSDIR)/lib/lkms
-LIBRARY 	+= -lnx_video_api -lnx_v4l2  -ldrm -lkms
-LIBRARY 	+= -L../../../lib
-LIBRARY		+= -lstdc++ -lpthread
-LIBRARY		+= --sysroot=$(SYSROOT_DIR)
+LIBRARY 	?= -L$(LIBPATH) -L$(LIBPATH)/ldrm -L$(LIBPATH)/lkms -lnx_video_api -lnx_v4l2  -ldrm -lkms
 
 #########################################################################
 #																		#

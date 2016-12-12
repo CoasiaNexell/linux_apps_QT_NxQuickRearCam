@@ -4,7 +4,6 @@ DIR		:=
 
 # Multi Media Libraries
 DIR += src
-DIR += apps/rearcamtest
 
 ######################################################################
 # Build

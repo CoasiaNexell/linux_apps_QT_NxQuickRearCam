@@ -1,3 +1,7 @@
+#include <sys/types.h>
+#include <sys/stat.h>
+#include <fcntl.h>
+
 #include "mainwindow.h"
 #include <QApplication>
 #include <QObject>
@@ -107,7 +111,20 @@ int main(int argc, char *argv[])
 
 	// Stop Kernel Layer Rear Camera Service
 	// This command is locked interface
-	system("echo 1 > /sys/devices/platform/nx-rearcam/stop");
+	char strBuf[64];
+	memset(strBuf, 0x00, 64);
+
+	int32_t fd = open( "/sys/devices/platform/nx-rearcam/stop", O_RDONLY );
+	read( fd, strBuf, sizeof(strBuf) );
+	if( !strncmp( strBuf, "1", sizeof(strBuf) ) )
+	{
+		close(fd );
+		system("echo 1 > /sys/devices/platform/nx-rearcam/stop");
+	}
+	else
+	{
+		close(fd );
+	}
 
 	w.setWindowFlags(Qt::Window|Qt::FramelessWindowHint);
 	w.setGeometry(0,0,1024,600);
