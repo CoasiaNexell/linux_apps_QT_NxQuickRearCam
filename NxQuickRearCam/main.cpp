@@ -116,7 +116,8 @@ int main(int argc, char *argv[])
 
 	int32_t fd = open( "/sys/devices/platform/nx-rearcam/stop", O_RDONLY );
 	read( fd, strBuf, sizeof(strBuf) );
-	if( !strncmp( strBuf, "1", sizeof(strBuf) ) )
+
+	if( !strncmp( strBuf, "0", sizeof(strBuf) ) )
 	{
 		close(fd );
 		system("echo 1 > /sys/devices/platform/nx-rearcam/stop");
